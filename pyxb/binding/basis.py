@@ -396,6 +396,10 @@ class _TypeBinding_mixin (utility.Locatable_mixin):
             self._validateBinding_vx()
         return True
 
+    def _postDOMValidate (self):
+        self.validateBinding()
+        return self
+
     @classmethod
     def _Name (cls):
         if cls._ExpandedName is not None:
@@ -541,8 +545,11 @@ class simpleTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixin
         '''
         nm = cls.__FacetMapAttributeNameMap.get(cls)
         if nm is None:
+            nm = cls.__name__
+            if nm.endswith('_'):
+                nm += '1'
             if cls == simpleTypeDefinition:
-                nm = '_%s__FacetMap' % (cls.__name__.strip('_'),)
+                nm = '_%s__FacetMap' % (nm,)
             else:
                 # It is not uncommon for a class in one namespace to extend a class of
                 # the same name in a different namespace, so encode the namespace URI
@@ -552,7 +559,7 @@ class simpleTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixin
                     ns_uri = cls._ExpandedName.namespaceURI()
                 except Exception, e:
                     pass
-                nm = '_' + utility.MakeIdentifier('%s_%s_FacetMap' % (ns_uri, cls.__name__.strip('_')))
+                nm = '_' + utility.MakeIdentifier('%s_%s_FacetMap' % (ns_uri, nm))
             cls.__FacetMapAttributeNameMap[cls] = nm
         return nm
 
@@ -585,7 +592,7 @@ class simpleTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixin
         except AttributeError:
             pass
         if fm is not None:
-            raise pyxb.LogicError('%s facet map initialized multiple times: %s' % (cls.__name__,cls.__FacetMapAttributeName()))
+            raise pyxb.LogicError('%s facet map initialized multiple times: %s' % (cls.__name__, cls.__FacetMapAttributeName()))
 
         # Search up the type hierarchy to find the nearest ancestor that has a
         # facet map.  This gets a bit tricky: if we hit the ceiling early
@@ -648,7 +655,7 @@ class simpleTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixin
                 args = (domutils.ExtractTextContent(dom_node),) + args
                 kw['_apply_whitespace_facet'] = True
         apply_whitespace_facet = kw.pop('_apply_whitespace_facet', True)
-        if (0 < len(args)) and isinstance(args[0], types.StringTypes):
+        if (0 < len(args)) and isinstance(args[0], types.StringTypes) and apply_whitespace_facet:
             cf_whitespace = getattr(cls, '_CF_whiteSpace', None)
             if cf_whitespace is not None:
                 #print 'Apply whitespace %s to "%s"' % (cf_whitespace, args[0])
@@ -1481,9 +1488,7 @@ class element (utility._DeconflictSymbols_mixin, _DynamicCreate_mixin):
         rv = type_class.Factory(_dom_node=node, _fallback_namespace=fallback_namespace, **kw)
         assert rv._element() == element_binding
         rv._setNamespaceContext(ns_ctx)
-        if pyxb._ParsingRequiresValid:
-            rv.validateBinding()
-        return rv
+        return rv._postDOMValidate()
 
     def __str__ (self):
         return 'Element %s' % (self.name(),)
@@ -1667,7 +1672,7 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
     _ReservedSymbols = _TypeBinding_mixin._ReservedSymbols.union(set([ 'wildcardElements', 'wildcardAttributeMap',
                              'xsdConstraintsOK', 'content', 'append', 'extend', 'value', 'reset' ]))
 
-    # None, or a reference to a ContentModel instance that defines how to
+    # None, or a reference to a ParticleModel instance that defines how to
     # reduce a DOM node list to the body of this element.
     _ContentModel = None
 
@@ -1725,7 +1730,7 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
         model, C{None} is returned.
 
         The base class implementation uses the
-        L{content.ContentModel.validate} method.  Subclasses may desire to
+        L{content.ParticleModel.validate} method.  Subclasses may desire to
         override this in cases where the desired order is not maintained by
         model interpretation (for example, when an "all" model is used and the
         original element order is desired).  See L{__childrenForDOM} as an
@@ -1775,13 +1780,12 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
                 rv[eu] = [ converter(value)]
         wce = self.wildcardElements()
         if (wce is not None) and (0 < len(wce)):
-            rv[None] = wce
+            rv[None] = wce[:]
         return rv
 
     def _validateAttributes (self):
         for au in self._AttributeMap.values():
             au.validate(self)
-        
 
     def _validateBinding_vx (self):
         if self._isNil():
@@ -1900,7 +1904,7 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
         else:
             self.__setContent(None)
 
-    __dfaStack = None
+    __modelState = None
     def reset (self):
         """Reset the instance.
 
@@ -1915,7 +1919,7 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
         for eu in self._ElementMap.values():
             eu.reset(self)
         if self._ContentModel is not None:
-            self.__dfaStack = self._ContentModel.initialDFAStack()
+            self.__modelState = self._ContentModel.newState()
         return self
 
     @classmethod
@@ -2029,7 +2033,7 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
                 return self
         if self._isNil() and not self._IsSimpleTypeContent():
             raise pyxb.ExtraContentError('%s: Content %s present in element with xsi:nil' % (type(self), value))
-        if maybe_element and (self.__dfaStack is not None):
+        if maybe_element and (self.__modelState is not None):
             # Allows element content.
             if not require_validation:
                 if element_use is not None:
@@ -2040,13 +2044,15 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
                     self._appendWildcardElement(value)
                     return self
             else:
-                if self.__dfaStack.step(self, value, element_use):
+                #print 'SSStep %s %s' % (value, element_use)
+                ( consumed, underflow_exc ) = self.__modelState.step(self, value, element_use)
+                if consumed:
                     return self
         # If what we have is element content, we can't accept it, either
         # because the type doesn't accept element content or because it does
         # and what we got didn't match the content model.
         if (element_binding is not None) or isinstance(value, xml.dom.Node):
-            raise pyxb.ExtraContentError('%s: Extra content starting with %s' % (self._ExpandedName, value,))
+            raise pyxb.ExtraContentError('%s: Extra content %s starting with %s' % (self._ExpandedName, element_binding, value,))
 
         # We have something that doesn't seem to be an element.  Are we
         # expecting simple content?
@@ -2100,13 +2106,17 @@ class complexTypeDefinition (_TypeBinding_mixin, utility._DeconflictSymbols_mixi
     def _IsMixed (cls):
         return (cls._CT_MIXED == cls._ContentTypeTag)
     
+    def _postDOMValidate (self):
+        if self._PerformValidation() and (not self._isNil()) and (self.__modelState is not None):
+            self.__modelState.verifyComplete()
+            self._validateAttributes()
+        return self
+
     def _setContentFromDOM (self, node, _fallback_namespace):
         """Initialize the content of this element from the content of the DOM node."""
 
         self.extend(node.childNodes[:], _fallback_namespace)
-        if self._PerformValidation() and (not self._isNil()) and (self.__dfaStack is not None) and (not self.__dfaStack.isTerminal()):
-            raise pyxb.MissingContentError()
-        return self
+        return self._postDOMValidate()
 
     def _setDOMFromAttributes (self, dom_support, element):
         """Add any appropriate attributes from this instance into the DOM element."""

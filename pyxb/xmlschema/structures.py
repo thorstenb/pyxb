@@ -161,10 +161,12 @@ class _SchemaComponent_mixin (pyxb.namespace._ComponentDependency_mixin,
             self.__namespaceContext = pyxb.namespace.resolution.NamespaceContext.GetNodeContext(node)
         if self.__namespaceContext is None:
             raise pyxb.LogicError('No namespace_context for schema component')
-        if isinstance(node, pyxb.utils.utility.Locatable_mixin):
-            self._setLocation(node.location)
-
+           
         super(_SchemaComponent_mixin, self).__init__(*args, **kw)
+
+        if isinstance(node, pyxb.utils.utility.Locatable_mixin):
+            self._setLocation(node._location())
+
         self._namespaceContext().targetNamespace()._associateComponent(self)
 
         self._setOwner(kw.get('owner'))
@@ -4820,7 +4822,7 @@ class Schema (_SchemaComponent_mixin):
         @keyword absolute_schema_location: A file path or URI.  This value is
         not normalized, and supersedes C{schema_location}.
         """
-        schema_location = kw.pop('absolute_schema_location', pyxb.utils.utility.NormalizeLocation(kw.get('schema_location'), kw.get('parent_uri')))
+        schema_location = kw.pop('absolute_schema_location', pyxb.utils.utility.NormalizeLocation(kw.get('schema_location'), kw.get('parent_uri'), kw.get('prefix_map')))
         kw['location_base'] = kw['schema_location'] = schema_location
         assert isinstance(schema_location, basestring), 'Unexpected value %s type %s for schema_location' % (schema_location, type(schema_location))
         uri_content_archive_directory = kw.get('uri_content_archive_directory')

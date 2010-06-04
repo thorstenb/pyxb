@@ -31,8 +31,6 @@ import content
 import datatypes
 import facets
 
-import nfa
-
 import types
 import sys
 import traceback
@@ -114,7 +112,7 @@ class ReferenceWildcard (ReferenceLiteral):
                     namespaces.append(None)
                 else:
                     namespaces.append(ns.uri())
-            template_map['nc'] = 'set(%s)' % (",".join( [ repr(_ns) for _ns in namespaces ]))
+            template_map['nc'] = 'set([%s])' % (",".join( [ repr(_ns) for _ns in namespaces ]))
         else:
             assert isinstance(wildcard.namespaceConstraint(), tuple)
             ns = wildcard.namespaceConstraint()[1]
@@ -285,72 +283,45 @@ def pythonLiteral (value, **kw):
     return str(value)
 
 
-def GenerateModelGroupAll (ctd, mga, binding_module, template_map, **kw):
-    mga_tag = '__AModelGroup'
-    template_map['mga_tag'] = mga_tag
+def GenerateContentTerm (ctd, term, binding_module, **kw):
     lines = []
-    lines2 = []
-    for ( dfa, is_required ) in mga.particles():
-        ( dfa_tag, dfa_lines ) = GenerateContentModel(ctd, dfa, binding_module, **kw)
-        lines.extend(dfa_lines)
-        template_map['dfa_tag'] = dfa_tag
-        template_map['is_required'] = binding_module.literal(is_required, **kw)
-        lines2.append(templates.replaceInText('    %{content}.ModelGroupAllAlternative(%{ctd}.%{dfa_tag}, %{is_required}),', **template_map))
-    lines.append(templates.replaceInText('%{mga_tag} = %{content}.ModelGroupAll(alternatives=[', **template_map))
-    lines.extend(lines2)
-    lines.append('])')
-    return (mga_tag, lines)
+    padding = '    '
+    separator = ",\n%s" % (padding,)
+    template_map = { 'ctd' : binding_module.literal(ctd, **kw) }
+    if isinstance(term, xs.structures.Wildcard):
+        term_val = binding_module.literal(term, **kw)
+    elif isinstance(term, xs.structures.ElementDeclaration):
+        term_val = templates.replaceInText('%{ctd}._UseForTag(%{field_tag})', field_tag=binding_module.literal(term.expandedName(), **kw), **template_map)
+    else:
+        gm_id = utility.PrepareIdentifier('GroupModel', binding_module.uniqueInClass(ctd), protected=True)
+        assert isinstance(term, xs.structures.ModelGroup)
+        if (term.C_ALL == term.compositor()):
+            group_val = 'All'
+        elif (term.C_CHOICE == term.compositor()):
+            group_val = 'Choice'
+        else:
+            assert term.C_SEQUENCE == term.compositor()
+            group_val = 'Sequence'
+        pvalues = []
+        for p in term.particles():
+            (value, plines) = GenerateContentParticle(ctd, p, binding_module, **kw)
+            if plines:
+                lines.extend(plines)
+            pvalues.append(value)
+        group_val = "pyxb.binding.content.Group%s(\n" % (group_val,) + padding + separator.join(pvalues) + "\n" + padding + ")"
+        template_map['gm_id'] = gm_id
+        lines.append(templates.replaceInText('%{ctd}.%{gm_id} = %{group_val}', group_val=group_val, **template_map))
+        term_val = templates.replaceInText('%{ctd}.%{gm_id}', **template_map)
+    return (term_val, lines)
 
-def GenerateContentModel (ctd, automaton, binding_module, **kw):
-    cmi = None
+def GenerateContentParticle (ctd, particle, binding_module, **kw):
     template_map = { }
     template_map['ctd'] = binding_module.literal(ctd, **kw)
-    try:
-        cmi = '_ContentModel_%d' % (ctd.__contentModelIndex,)
-        ctd.__contentModelIndex += 1
-    except AttributeError:
-        cmi = '_ContentModel'
-        ctd.__contentModelIndex = 1
-    template_map['cm_tag'] = cmi
-    template_map['content'] = 'pyxb.binding.content'
-    template_map['state_comma'] = ' '
-    lines = []
-    lines2 = []
-    for (state, transitions) in automaton.items():
-        if automaton.end() == state:
-            continue
-        template_map['state'] = binding_module.literal(state)
-        template_map['is_final'] = binding_module.literal(None in transitions)
-
-        lines2.append(templates.replaceInText('%{state_comma} %{state} : %{content}.ContentModelState(state=%{state}, is_final=%{is_final}, transitions=[', **template_map))
-        template_map['state_comma'] = ','
-        lines3 = []
-        for (key, destinations) in transitions.items():
-            if key is None:
-                continue
-            assert 1 == len(destinations)
-            template_map['next_state'] = binding_module.literal(list(destinations)[0], **kw)
-            if isinstance(key, xs.structures.Wildcard):
-                template_map['kw_key'] = 'term'
-                template_map['kw_val'] = binding_module.literal(key, **kw)
-            elif isinstance(key, nfa.AllWalker):
-                (mga_tag, mga_defns) = GenerateModelGroupAll(ctd, key, binding_module, template_map.copy(), **kw)
-                template_map['kw_key'] = 'term'
-                template_map['kw_val'] = mga_tag
-                lines.extend(mga_defns)
-            else:
-                assert isinstance(key, xs.structures.ElementDeclaration)
-                template_map['kw_key'] = 'element_use'
-                template_map['kw_val'] = templates.replaceInText('%{ctd}._UseForTag(%{field_tag})', field_tag=binding_module.literal(key.expandedName(), **kw), **template_map)
-            lines3.append(templates.replaceInText('%{content}.ContentModelTransition(next_state=%{next_state}, %{kw_key}=%{kw_val}),',
-                          **template_map))
-        lines2.extend([ '    '+_l for _l in lines3 ])
-        lines2.append("])")
-
-    lines.append(templates.replaceInText('%{ctd}.%{cm_tag} = %{content}.ContentModel(state_map = {', **template_map))
-    lines.extend(['    '+_l for _l in lines2 ])
-    lines.append("})")
-    return (cmi, lines)
+    template_map['min_occurs'] = repr(particle.minOccurs())
+    template_map['max_occurs'] = repr(particle.maxOccurs())
+    (term_val, lines) = GenerateContentTerm(ctd, particle.term(), binding_module, **kw)
+    particle_val = templates.replaceInText('pyxb.binding.content.ParticleModel(%{term_val}, min_occurs=%{min_occurs}, max_occurs=%{max_occurs})', term_val=term_val, **template_map)
+    return (particle_val, lines)
 
 def _useEnumerationTags (td):
     assert isinstance(td, xs.structures.SimpleTypeDefinition)
@@ -692,10 +663,12 @@ class %{ctd} (%{superclass}):
 %{ctd}._AddElement(pyxb.binding.basis.element(%{name_expr}, %{typeDefinition}%{element_aux_init}))
 ''', name_expr=binding_module.literal(ed.expandedName(), **kw), ctd=template_map['ctd'], **ef_map))
 
-        fa = nfa.Thompson(content_basis).nfa()
-        fa = fa.buildDFA()
-        (cmi, cmi_defn) = GenerateContentModel(ctd=ctd, automaton=fa, binding_module=binding_module, **kw)
-        outf.postscript().append("\n".join(cmi_defn))
+        cm_tag = utility.PrepareIdentifier('ContentModel', binding_module.uniqueInClass(ctd), protected=True)
+        (particle_val, lines) = GenerateContentParticle(ctd=ctd, particle=content_basis, binding_module=binding_module, **kw)
+        if lines:
+            outf.postscript().append("\n".join(lines))
+            outf.postscript().append("\n")
+        outf.postscript().append(templates.replaceInText('%{ctd}.%{cm_tag} = %{particle_val}', ctd=template_map['ctd'], cm_tag=cm_tag, particle_val=particle_val))
         outf.postscript().append("\n")
 
     if need_content:
@@ -717,43 +690,45 @@ class %{ctd} (%{superclass}):
         ad = au.attributeDeclaration()
         assert isinstance(ad.scope(), xs.structures.ComplexTypeDefinition), 'unexpected scope %s' % (ad.scope(),)
         au_map = ad._templateMap()
-        if ad.scope() == ctd:
-            assert isinstance(au_map, dict)
-            if au.restrictionOf() is not None:
-                #print 'Local %s restriction of %s' % (au_map, au.restrictionOf().attributeDeclaration()._templateMap())
-                au_map = au.restrictionOf().attributeDeclaration()._templateMap().copy()
-                definitions.append(templates.replaceInText('''
-    # Attribute %{id} is restricted from parent''', **au_map))
-
-            assert ad.typeDefinition() is not None
-            au_map['attr_type'] = binding_module.literal(ad.typeDefinition(), **kw)
-                            
-            vc_source = ad
-            if au.valueConstraint() is not None:
-                vc_source = au
-            aux_init = []
-            if vc_source.fixed() is not None:
-                aux_init.append('fixed=True')
-                aux_init.append('unicode_default=%s' % (binding_module.literal(vc_source.fixed(), **kw),))
-            elif vc_source.default() is not None:
-                aux_init.append('unicode_default=%s' % (binding_module.literal(vc_source.default(), **kw),))
-            if au.required():
-                aux_init.append('required=True')
-            if au.prohibited():
-                aux_init.append('prohibited=True')
-            if 0 == len(aux_init):
-                au_map['aux_init'] = ''
-            else:
-                aux_init.insert(0, '')
-                au_map['aux_init'] = ', '.join(aux_init)
-            if ad.annotation() is not None:
-                au_map['documentation'] = binding_module.literal(unicode(ad.annotation()))
-            else:
-                au_map['documentation'] = binding_module.literal(None)
         if ad.scope() != ctd:
             definitions.append(templates.replaceInText('''
     # Attribute %{id} inherited from %{decl_type_en}''', decl_type_en=unicode(ad.scope().expandedName()), **au_map))
             continue
+        assert isinstance(au_map, dict)
+        aur = au;
+        while aur.restrictionOf() is not None:
+            aur = aur.restrictionOf()
+        if au != aur:
+            #print 'Local %s restriction of %s' % (au_map, aur.attributeDeclaration()._templateMap())
+            au_map = aur.attributeDeclaration()._templateMap().copy()
+            definitions.append(templates.replaceInText('''
+    # Attribute %{id} is restricted from parent''', **au_map))
+
+        assert ad.typeDefinition() is not None
+        au_map['attr_type'] = binding_module.literal(ad.typeDefinition(), **kw)
+                            
+        vc_source = ad
+        if au.valueConstraint() is not None:
+            vc_source = au
+        aux_init = []
+        if vc_source.fixed() is not None:
+            aux_init.append('fixed=True')
+            aux_init.append('unicode_default=%s' % (binding_module.literal(vc_source.fixed(), **kw),))
+        elif vc_source.default() is not None:
+            aux_init.append('unicode_default=%s' % (binding_module.literal(vc_source.default(), **kw),))
+        if au.required():
+            aux_init.append('required=True')
+        if au.prohibited():
+            aux_init.append('prohibited=True')
+        if 0 == len(aux_init):
+            au_map['aux_init'] = ''
+        else:
+            aux_init.insert(0, '')
+            au_map['aux_init'] = ', '.join(aux_init)
+        if ad.annotation() is not None:
+            au_map['documentation'] = binding_module.literal(unicode(ad.annotation()))
+        else:
+            au_map['documentation'] = binding_module.literal(None)
 
         attribute_uses.append(templates.replaceInText('%{use}.name() : %{use}', **au_map))
         if ad.expandedName().localName() != au_map['id']:
@@ -1098,11 +1073,9 @@ class _ModuleNaming_mixin (object):
         rv = component.bestNCName()
         if rv is None:
             if isinstance(component, xs.structures.ComplexTypeDefinition):
-                rv = '_CTD_ANON_%d' % (self.__anonCTDIndex,)
-                self.__anonCTDIndex += 1
+                rv = utility.PrepareIdentifier('CTD_ANON', self.uniqueInClass(component), protected=True)
             elif isinstance(component, xs.structures.SimpleTypeDefinition):
-                rv = '_STD_ANON_%d' % (self.__anonSTDIndex,)
-                self.__anonSTDIndex += 1
+                rv = utility.PrepareIdentifier('STD_ANON', self.uniqueInClass(component), protected=True)
             else:
                 assert False
             kw['protected'] = True
@@ -1567,6 +1540,46 @@ class Generator (object):
         return self
     __schemaStrippedPrefix = None
 
+    def locationPrefixRewriteMap (self):
+        """Optional map to rewrite schema locations.
+
+        This applies only to the values of schemaLocation attributes
+        in C{import} and C{include} elements.  Its purpose is to
+        convert remote or absolute schema locations into local or
+        relative ones to allow offline processing when all schema are
+        available in a local directory.  See C{schemaRoot}.
+        """
+        return self.__locationPrefixRewriteMap
+    def setLocationPrefixRewriteMap (self, location_prefix_rewrite_map):
+        self.__locationPrefixMap.clear()
+        print 'GOT "%s"' % (location_prefix_rewrite_map,)
+        self.__locationPrefixMap.update(location_prefix_rewrite_map)
+        return self
+    def addLocationPrefixRewrite (self, prefix, substituent):
+        """Add a rewrite entry for schema locations.
+
+        @param prefix : A text prefix that should be removed from
+        schema location URIs.
+
+        @param substituent : The text prefix that should replace
+        C{prefix} as a prefix in a schema location URI.
+        """
+        
+        self.__locationPrefixRewriteMap[prefix] = substituent
+        return self
+    def argAddLocationPrefixRewrite (self, prefix_rewrite):
+        """Add a rewrite entry for schema locations.
+
+        Parameter values are strings of the form C{pfx=sub}.  The
+        effect is that a schema location that begins with C{pfx} is
+        rewritten so that it instead begins with C{sub}."""
+        try:
+            (prefix, substituent) = prefix_rewrite.split('=', 1)
+        except:
+            raise
+        self.addLocationPrefixRewrite(prefix, substituent)
+    __locationPrefixMap = {}
+
     def schemaLocationList (self):
         """A list of locations from which entrypoint schemas are to be
         read.
@@ -1886,6 +1899,7 @@ class Generator (object):
         @keyword binding_root: Invokes L{setBindingRoot}
         @keyword schema_root: Invokes L{setSchemaRoot}
         @keyword schema_stripped_prefix: Invokes L{setSchemaStrippedPrefix}
+        @keyword location_prefix_rewrite_map: Invokes L{setLocationPrefixRewriteMap}
         @keyword schema_location_list: Invokes L{setSchemaLocationList}
         @keyword module_list: Invokes L{_setModuleList}
         @keyword module_prefix: Invokes L{setModulePrefix}
@@ -1913,6 +1927,7 @@ class Generator (object):
         self.__bindingRoot = kw.get('binding_root', self._DEFAULT_bindingRoot)
         self.__schemaRoot = kw.get('schema_root', '.')
         self.__schemaStrippedPrefix = kw.get('schema_stripped_prefix')
+        self.__locationPrefixRewriteMap = kw.get('location_prefix_rewrite_map', {})
         self.__schemas = []
         self.__schemaLocationList = kw.get('schema_location_list', [])[:]
         self.__moduleList = kw.get('module_list', [])[:]
@@ -1951,6 +1966,7 @@ class Generator (object):
         ('binding_root', setBindingRoot),
         ('schema_root', setSchemaRoot),
         ('schema_stripped_prefix', setSchemaStrippedPrefix),
+        ('location_prefix_rewrite', argAddLocationPrefixRewrite),
         ('schema_location', setSchemaLocationList),
         ('module', _setModuleList),
         ('module_prefix', setModulePrefix),
@@ -1976,6 +1992,7 @@ class Generator (object):
         self._setNamespaceVisibilities(public_namespaces, private_namespaces)
         if args is not None:
             self.__schemaLocationList.extend(args)
+        pyxb.utils.utility.SetLocationPrefixRewriteMap(self.locationPrefixRewriteMap())
 
     def setFromCommandLine (self, argv=None):
         if argv is None:
@@ -2009,6 +2026,8 @@ class Generator (object):
                              help=self.__stripSpaces(self.schemaRoot.__doc__))
             group.add_option('--schema-stripped-prefix', metavar="TEXT", type='string',
                              help=self.__stripSpaces(self.schemaStrippedPrefix.__doc__))
+            group.add_option('--location-prefix-rewrite', metavar="TEXT", type='string',
+                             help=self.__stripSpaces(self.argAddLocationPrefixRewrite.__doc__))
             group.add_option('--uri-content-archive-directory', metavar="DIRECTORY",
                              help=self.__stripSpaces(self.uriContentArchiveDirectory.__doc__))
             parser.add_option_group(group)
@@ -2110,6 +2129,8 @@ class Generator (object):
             opts.append('--schema-root=' + self.schemaRoot())
         if self.schemaStrippedPrefix() is not None:
             opts.append('--schema-stripped-prefix=%s' + self.schemaStrippedPrefix())
+        for (pfx, sub) in self.locationPrefixRewriteMap():
+            opts.append('--location-prefix-rewrite=%s=%s' % (pfx, sub))
         if self.modulePrefix() is not None:
             opts.append('--module-prefix=' + self.modulePrefix())
         opts.append('--binding-root=' + self.bindingRoot())
@@ -2182,7 +2203,9 @@ class Generator (object):
                 converter = None
             try:
                 if converter is None:
-                    schema = xs.schema.CreateFromLocation(absolute_schema_location=self.normalizeSchemaLocation(sl), generation_uid=self.generationUID(), uri_content_archive_directory=self.uriContentArchiveDirectory())
+                    schema = xs.schema.CreateFromLocation(absolute_schema_location=self.normalizeSchemaLocation(sl),
+                                                          generation_uid=self.generationUID(),
+                                                          uri_content_archive_directory=self.uriContentArchiveDirectory())
                 else:
                     schema = converter(self, sl)
                 self.addSchema(schema)
